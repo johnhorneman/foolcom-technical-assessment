@@ -5,6 +5,9 @@ the CMS under a short time budget. If that succeeds, serve it and store it
 as the last known good copy. If the fetch times out, errors, or returns
 invalid content, serve the stored copy. Return 503 only when there is no
 stored copy either.
+Concurrent fetches for the same article are coalesced (D-009). Every
+response carries X-Cache and X-Article-Version headers so cache behavior can
+be seen with a single curl -i.
 
 The service revalidates on every request instead of using a TTL because
 corrections are published directly to the CMS and this service is not
@@ -21,18 +24,21 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from services.content_service.cache import ArticleCache
+from services.content_service.cache import ArticleCache, SingleFlight
 from services.content_service.cms_client import (
     ArticleNotFound,
     CmsClient,
     UpstreamError,
+    UpstreamTimeout,
 )
+from services.content_service.models import Article, ArticleIndex
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.cms = CmsClient()
     app.state.cache = ArticleCache()
+    app.state.flights = SingleFlight()
     yield
     await app.state.cms.aclose()
 
@@ -48,11 +54,27 @@ async def not_found(request: Request, exc: ArticleNotFound) -> JSONResponse:
     return JSONResponse({"error": "Not Found"}, status_code=404)
 
 
+def _stale_reason(exc: UpstreamError) -> str:
+    # The header only needs two buckets; the exact error type goes to the
+    # logs. Timeouts get their own bucket because they are the failures the
+    # reader waits for: a stale-timeout response spent the whole budget.
+    return "stale-timeout" if isinstance(exc, UpstreamTimeout) else "stale-error"
+
+
+def _serve(payload: Article | ArticleIndex, cache_status: str) -> JSONResponse:
+    headers = {"X-Cache": cache_status}
+    if isinstance(payload, Article):
+        headers["X-Article-Version"] = str(payload.version)
+    return JSONResponse(payload.model_dump(), headers=headers)
+
+
 def _unavailable(exc: UpstreamError) -> JSONResponse:
     # Empty cache and a failing upstream. An error is better than invented
     # content, especially for financial articles (D-007).
     return JSONResponse(
-        {"error": f"content temporarily unavailable ({exc})"}, status_code=503
+        {"error": f"content temporarily unavailable ({exc})"},
+        status_code=503,
+        headers={"X-Cache": "miss"},
     )
 
 
@@ -60,30 +82,37 @@ def _unavailable(exc: UpstreamError) -> JSONResponse:
 async def article_index(request: Request) -> JSONResponse:
     state = request.app.state
     try:
-        index = await state.cms.get_index()
+        index = await state.flights.run("index", state.cms.get_index)
     except ArticleNotFound:
         raise
     except UpstreamError as exc:
         cached = state.cache.get_index()
         if cached is not None:
-            return JSONResponse(cached.index.model_dump())
+            return _serve(cached.index, _stale_reason(exc))
         return _unavailable(exc)
     state.cache.put_index(index)
-    return JSONResponse(index.model_dump())
+    return _serve(index, "fresh")
 
 
 @app.get("/articles/{path:path}")
 async def article(request: Request, path: str, source: str | None = None) -> JSONResponse:
     state = request.app.state
+
+    # The flight key includes source because source changes what the CMS
+    # does. The cache key is the path alone because source is not part of
+    # the article's identity. See SingleFlight and D-009.
+    async def fetch() -> Article:
+        return await state.cms.get_article(path, source)
+
     try:
-        fresh = await state.cms.get_article(path, source)
+        fresh = await state.flights.run(f"article:{path}?source={source or ''}", fetch)
     except ArticleNotFound:
         raise  # an answer, not a failure; handled by not_found() (D-008)
     except UpstreamError as exc:
         cached = state.cache.get_article(path)
         if cached is not None:
             # A real article, even an old one, is better than an error.
-            return JSONResponse(cached.article.model_dump())
+            return _serve(cached.article, _stale_reason(exc))
         return _unavailable(exc)
     state.cache.put_article(fresh)
-    return JSONResponse(fresh.model_dump())
+    return _serve(fresh, "fresh")

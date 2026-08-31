@@ -19,11 +19,14 @@ Properties of the design:
   production version would need an LRU bound and a shared tier (D-004).
 
 Everything runs on one asyncio event loop, so dict mutations are atomic
-between awaits and no lock is needed for memory safety here. Coalescing of
-duplicate upstream fetches is a separate concern and is added in a later
-commit.
+between awaits and no lock is needed for memory safety. SingleFlight exists
+for a different reason: to avoid duplicate upstream fetches when concurrent
+requests want the same thing. Every page view already makes two identical
+requests, one from generateMetadata and one from the page render.
 """
 
+import asyncio
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -62,3 +65,36 @@ class ArticleCache:
 
     def put_index(self, index: ArticleIndex) -> None:
         self._index = IndexEntry(index=index, fetched_at=_now())
+
+
+class SingleFlight:
+    """Coalesce concurrent calls for the same key into one in-flight task.
+
+    The first caller for a key starts the work. Anyone who arrives while it
+    is in flight awaits the same task and shares its result, including a
+    failure. Sharing failures is intentional: when the upstream is timing
+    out, one caller should pay the timeout budget, not every caller.
+
+    The key matters (D-009). Flights are keyed by path and source, which
+    together identify the fetch. The cache is keyed by path alone, which
+    identifies the article. Coalescing by path alone could hand a healthy
+    request the failure of a concurrent corrupt-mode fetch.
+
+    The task is removed from the registry as soon as it settles, so a
+    finished flight is never joined late. The next request starts a new
+    fetch, which is what revalidating on every request requires.
+    """
+
+    def __init__(self) -> None:
+        self._flights: dict[str, asyncio.Task] = {}
+
+    async def run(self, key: str, fn: Callable[[], Coroutine]) -> object:
+        existing = self._flights.get(key)
+        if existing is not None:
+            return await existing
+        task = asyncio.create_task(fn())
+        self._flights[key] = task
+        try:
+            return await task
+        finally:
+            del self._flights[key]

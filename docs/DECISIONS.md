@@ -149,3 +149,20 @@ Nothing serves it while the CMS keeps returning 404, and if the article comes
 back a fresh fetch replaces it.
 Revisit when: real unpublish or takedown flows exist. Then deletion (c) plus
 an explicit purge event would be correct.
+
+## D-009: Coalescing key is path plus source; cache key is path only (accepted)
+Date: 2026-08-31
+Context: concurrent upstream fetches are now coalesced, because each page view
+already makes two identical requests. What counts as "the same fetch"?
+Options: (a) coalesce by article path, matching the cache key; (b) coalesce
+by path plus the forwarded source parameter.
+Choice: (b).
+Why: the cache stores articles, and an article's identity is its path. Source
+is test tooling and must never affect what is stored or served from cache. A
+flight is a fetch, though, and source changes what the upstream will do.
+Coalescing by path alone could hand a healthy request the failure result of a
+concurrent corrupt-mode fetch, or the reverse. Coalesced callers share
+failures on purpose, since one caller paying the timeout budget is the point
+of coalescing, and that makes sharing across different sources wrong.
+Revisit when: production, where source does not exist. The two keys collapse
+into one and (a) becomes correct.

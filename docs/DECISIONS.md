@@ -210,3 +210,60 @@ from the real CMS contract. That is acceptable because the contract is four
 fields and four modes, and the manual browser checklist still runs against the
 real thing.
 Revisit when: the CMS contract grows.
+
+## D-012: Startup cache warming is built; the production version looks different (accepted)
+Date: 2026-08-31
+Context: an empty cache plus a failing upstream is the one case that still
+returns 503 (D-007). When does warming help? Only when the CMS is healthy at
+startup but fails before an article's first request. That case is common: we
+redeploy this service, which empties its cache, far more often than the CMS
+goes down.
+Choice: a best-effort sequential warm of the index and all articles during
+lifespan startup, logged as cache_warmed or cache_warming_skipped. Any failure
+means starting with an empty cache, never a failed startup. It blocks startup
+for about half a second at this scale.
+Why: about twenty lines for a real reduction of the only remaining 503 window,
+and it demos well: restart the service and /healthz immediately shows
+articles_cached=4.
+Production differences, in order of preference: (1) a persistent or shared
+cache tier (Redis or disk) so new instances start warm by definition; at
+500,000 articles nobody walks the catalog. (2) Rolling deploys plus a readiness
+probe that holds traffic until the instance is warm, so no reader reaches a
+cold instance. (3) If warming at all, warm only the hot set, for example the
+top N paths from CDN logs, since article traffic is heavily concentrated at the
+head.
+Revisit when: the catalog grows or instances multiply. Switch to (1).
+
+## D-013: Circuit breaker; considered and deferred (deferred)
+Date: 2026-08-31
+Context: during a sustained upstream failure, each wave of requests still pays
+one coalesced probe. For timeout-shaped failures (hang, slow) that probe costs
+the full budget of about a second, felt by whoever is riding the coalesced
+fetch.
+Why deferred: at this scale the probe cost is bounded and small, one probe per
+article per wave thanks to singleflight. A breaker would be the most complex
+state machine in the codebase (closed, open, half-open, thresholds to defend,
+recovery probes), and a buggy breaker is worse than none. The pattern matters
+at production scale as much for the upstream as for the reader: a struggling
+CMS needs less traffic, not a probe per article. Production shape: open after
+N consecutive failures per upstream, not per article; serve stale immediately
+while open; allow a single probe after a cooldown; tune the thresholds from
+outage data in Datadog.
+Revisit when: there is real traffic, or an upstream whose failure mode is slow
+rather than fast.
+
+## D-014: Negative caching (caching 404s); considered and rejected for a media site (deferred)
+Date: 2026-08-31
+Context: article sites take heavy 404 traffic from dead links, crawlers, and
+"hot 404s" from viral bad links. Each 404 currently costs an upstream fetch.
+Why rejected here: the highest-traffic moment of an article's life is the
+seconds after publish. A 404 cached even 60 seconds earlier, for example by a
+crawler probing the about-to-publish path, would hide a brand-new article from
+its own launch traffic. That is the worst possible reader to fail. In this
+exercise the catalog is fixed, nothing is ever newly published, and 404 volume
+is not tested, so the code would prove nothing while adding a second cache
+with different invalidation rules from the article cache.
+Production shape if built: a TTL of a few seconds, purge-on-publish driven by
+CMS events, and scope limited to paths that have 404'd repeatedly rather than
+every miss.
+Revisit when: production, with publish events available to purge against.

@@ -36,7 +36,37 @@ from services.content_service.cms_client import (
     UpstreamTimeout,
 )
 from services.content_service.models import Article, ArticleIndex
-from services.content_service.observability import Observability
+from services.content_service.observability import Observability, log_event
+
+
+async def _warm_cache(state) -> None:
+    """Pre-fetch the index and every article at startup (D-012).
+
+    Warming covers one case: the CMS is healthy when this service starts but
+    fails before an article's first request. That case is common because
+    this service is redeployed, which empties the cache, far more often than
+    the CMS goes down. If warming fails, the service starts with an empty
+    cache, which is how it behaved before warming existed. Warming must
+    never prevent startup.
+
+    Walking the whole catalog is only reasonable because it is four
+    articles. In production the equivalent is a persistent or shared cache
+    tier.
+    """
+    try:
+        index = await state.cms.get_index()
+    except UpstreamError as exc:
+        log_event("cache_warming_skipped", reason=str(exc))
+        return
+    state.cache.put_index(index)
+    warmed = 0
+    for entry in index.articles:
+        try:
+            state.cache.put_article(await state.cms.get_article(entry.path, None))
+            warmed += 1
+        except UpstreamError:
+            continue
+    log_event("cache_warmed", articles=warmed, catalog=len(index.articles))
 
 
 @asynccontextmanager
@@ -45,6 +75,10 @@ async def lifespan(app: FastAPI):
     app.state.cms = CmsClient(obs=app.state.obs)
     app.state.cache = ArticleCache()
     app.state.flights = SingleFlight()
+    # Warming blocks startup for about half a second (four articles at
+    # roughly 100ms each). At this scale that is simpler than gating
+    # readiness on a background task. D-012 covers the production version.
+    await _warm_cache(app.state)
     yield
     await app.state.cms.aclose()
 

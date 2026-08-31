@@ -125,3 +125,20 @@ async def test_healthz_reports_upstream_state(
     health = (await client.get("/healthz")).json()
     assert health["upstream"]["state"] in ("degraded", "failing")
     assert health["cache"]["articles_cached"] == 1
+
+
+async def test_warming_fills_cache(client: httpx.AsyncClient) -> None:
+    from services.content_service.main import _warm_cache, app
+
+    await _warm_cache(app.state)
+    assert app.state.cache.stats() == {"articles_cached": 1, "index_cached": True}
+
+
+async def test_warming_tolerates_dead_upstream(
+    client: httpx.AsyncClient, fake_cms: FakeCms
+) -> None:
+    from services.content_service.main import _warm_cache, app
+
+    fake_cms.mode = "down"
+    await _warm_cache(app.state)  # must not raise; an empty cache is the fallback
+    assert app.state.cache.stats()["articles_cached"] == 0

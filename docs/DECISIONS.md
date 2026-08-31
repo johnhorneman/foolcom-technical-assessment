@@ -166,3 +166,27 @@ failures on purpose, since one caller paying the timeout budget is the point
 of coalescing, and that makes sharing across different sources wrong.
 Revisit when: production, where source does not exist. The two keys collapse
 into one and (a) becomes correct.
+
+## D-010: Observability is standard-library JSON log lines plus JSON counters; no structlog or Prometheus (accepted)
+Date: 2026-08-31
+Context: the README requires that logs and metrics alone answer three
+questions: is the upstream healthy right now, was this page served from cache
+or fetched fresh, and did a correction propagate and when.
+Options: (a) structlog and prometheus-client with the exposition format; (b)
+standard-library logging that writes one JSON object per line, plus an
+in-process Counter served as JSON from /metrics; (c) print statements.
+Choice: (b).
+Why: nothing scrapes this service in the exercise. The operator is a person
+with curl, so the Prometheus text format serves no one, and structlog is a
+dependency that does what fifteen lines of standard library do here (D-001).
+One JSON object per line on stdout is the twelve-factor shape that Datadog's
+agent ingests as-is, and the field names (event, outcome, cache, ms, version)
+are chosen to become Datadog log attributes and custom metrics without
+renaming. There are three event types, one per README question:
+upstream_fetch, logged once per real attempt after coalescing; request, logged
+once per served page; and correction_propagated, which carries the old and new
+version and whose timestamp is the propagation time. The health state
+(healthy, degraded, failing) is a rolling window of ten attempts with
+thresholds sized for this exercise. Production would replace that judgment
+with Datadog monitors over rates, which can be tuned without a deploy.
+Revisit when: something starts scraping, or log volume needs sampling.

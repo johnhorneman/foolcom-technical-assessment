@@ -63,6 +63,9 @@ class ArticleCache:
     def get_index(self) -> IndexEntry | None:
         return self._index
 
+    def stats(self) -> dict:
+        return {"articles_cached": len(self._articles), "index_cached": self._index is not None}
+
     def put_index(self, index: ArticleIndex) -> None:
         self._index = IndexEntry(index=index, fetched_at=_now())
 

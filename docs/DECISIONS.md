@@ -190,3 +190,23 @@ version and whose timestamp is the propagation time. The health state
 thresholds sized for this exercise. Production would replace that judgment
 with Datadog monitors over rates, which can be tuned without a deploy.
 Revisit when: something starts scraping, or log volume needs sampling.
+
+## D-011: Tests fake the CMS with httpx.MockTransport; no respx, no sleeping (accepted)
+Date: 2026-08-31
+Context: the failure-mode behaviors need regression tests. The plan originally
+penciled in respx for httpx mocking.
+Options: (a) respx; (b) httpx's built-in MockTransport with a FakeCms of about
+fifty lines that mirrors the mock CMS contract; (c) run the real mock CMS in
+the tests.
+Choice: (b).
+Why: MockTransport gives the same interception with no new dependency (D-001),
+and the fake raises httpx.ReadTimeout instead of sleeping through a real
+budget, so the timeout paths test in milliseconds. The tests exercise the real
+app, client, cache, and coalescer through ASGITransport. Only the transport is
+fake. ASGITransport skips the lifespan, so the fixture wires app.state itself.
+Option (c) would tie test timing to real sleeps (the slow mode takes 8s) and to
+the package we are not allowed to modify. The cost is that FakeCms could drift
+from the real CMS contract. That is acceptable because the contract is four
+fields and four modes, and the manual browser checklist still runs against the
+real thing.
+Revisit when: the CMS contract grows.

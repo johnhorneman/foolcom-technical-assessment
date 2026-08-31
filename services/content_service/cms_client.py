@@ -73,9 +73,18 @@ class UpstreamInvalid(UpstreamError):
 
 
 class CmsClient:
-    def __init__(self, obs: Observability, base_url: str = CMS_BASE_URL) -> None:
-        # One shared AsyncClient gives connection pooling and a single place to close.
-        self._client = httpx.AsyncClient(base_url=base_url, timeout=UPSTREAM_TIMEOUT)
+    def __init__(
+        self,
+        obs: Observability,
+        base_url: str = CMS_BASE_URL,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        # One shared AsyncClient gives connection pooling and a single place
+        # to close. `transport` exists for tests, which pass an
+        # httpx.MockTransport to stand in for the CMS (D-011).
+        self._client = httpx.AsyncClient(
+            base_url=base_url, timeout=UPSTREAM_TIMEOUT, transport=transport
+        )
         self._obs = obs
 
     async def aclose(self) -> None:

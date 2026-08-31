@@ -3,11 +3,12 @@
 All upstream I/O goes through this module so that the timeout policy and the
 failure classification live in one place. Callers never see httpx or Pydantic
 exceptions. Every failure is raised as one of the UpstreamError subclasses
-below, which will let the cache layer treat a timeout, a 500, and an invalid
+below, which lets the cache layer treat a timeout, a 500, and an invalid
 payload the same way: fall back to the last known good copy.
 
-The timeout is still the generous first-version value. The real budget of
-about 1s is decision D-005 and arrives with the cache.
+The time budget (D-005) is the main safety mechanism. It is about ten times
+the CMS's healthy latency, so with a warm cache the worst case for a slow or
+hung upstream is one timed-out fetch of about one second.
 """
 
 import httpx
@@ -17,8 +18,13 @@ from services.content_service.models import Article, ArticleIndex
 
 CMS_BASE_URL = "http://localhost:8001"
 
-# Generous on purpose until the cache exists to absorb timeouts (D-005).
-PHASE1_TIMEOUT_S = 10.0
+# D-005: a total budget of 1s is about 10x the CMS's healthy p50 of 100ms.
+# That leaves little risk of false timeouts locally and still catches `slow`
+# (8s) and `hang` (never) quickly. The connect timeout is tighter because on
+# localhost a connection either succeeds immediately or the process is gone.
+# In production these numbers would come from latency histograms rather
+# than constants.
+UPSTREAM_TIMEOUT = httpx.Timeout(1.0, connect=0.2)
 
 
 class UpstreamError(Exception):
@@ -52,7 +58,7 @@ class UpstreamInvalid(UpstreamError):
 class CmsClient:
     def __init__(self, base_url: str = CMS_BASE_URL) -> None:
         # One shared AsyncClient gives connection pooling and a single place to close.
-        self._client = httpx.AsyncClient(base_url=base_url, timeout=PHASE1_TIMEOUT_S)
+        self._client = httpx.AsyncClient(base_url=base_url, timeout=UPSTREAM_TIMEOUT)
 
     async def aclose(self) -> None:
         await self._client.aclose()

@@ -131,3 +131,21 @@ Why: invented article content is worse than an error for readers and crawlers
 alike. Made-up financial content is a real harm at Fool.com. The Next.js error
 boundary gives the reader a retry button.
 Revisit when: time allows warming.
+
+## D-008: A CMS 404 is an answer, not a failure; no stale fallback for it (accepted)
+Date: 2026-08-31
+Context: with a last-known-good cache, what should happen when the CMS returns
+404 for an article we have cached?
+Options: (a) treat 404 like any failure and serve the cached copy; (b) trust
+the 404 and return 404, leaving the cache entry in place; (c) trust the 404
+and also delete the cache entry.
+Choice: (b).
+Why: a 404 is the CMS answering, not failing. In the mock CMS every failure
+mode returns before the store lookup, so a 404 always comes from a healthy code
+path. Serving a stale copy on 404 would keep unpublished articles, possibly
+ones pulled for legal reasons, available indefinitely. That is worse than a
+404. The entry is left in place only to avoid deletion logic we do not need.
+Nothing serves it while the CMS keeps returning 404, and if the article comes
+back a fresh fetch replaces it.
+Revisit when: real unpublish or takedown flows exist. Then deletion (c) plus
+an explicit purge event would be correct.

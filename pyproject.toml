@@ -1,0 +1,32 @@
+[project]
+name = "foolcom-technical-assessment"
+version = "0.1.0"
+description = "Fool.com technical assessment: Next.js app + mock CMS"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[tool.uv]
+package = false
+
+# pytest isn't set up with any tests, but it's preinstalled and configured
+# in case you want some.
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "UP", "I"]

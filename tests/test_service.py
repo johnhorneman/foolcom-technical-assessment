@@ -96,9 +96,7 @@ async def test_404_wins_over_cache(client: httpx.AsyncClient, fake_cms: FakeCms)
     assert response.status_code == 404
 
 
-async def test_index_serves_stale_on_failure(
-    client: httpx.AsyncClient, fake_cms: FakeCms
-) -> None:
+async def test_index_serves_stale_on_failure(client: httpx.AsyncClient, fake_cms: FakeCms) -> None:
     fresh = await client.get("/articles")
     assert fresh.headers["x-cache"] == "fresh"
     fake_cms.mode = "down"  # the index takes no source param; fail via mode
@@ -116,9 +114,7 @@ async def test_concurrent_requests_coalesce_upstream(
     assert fake_cms.calls == 1
 
 
-async def test_healthz_reports_upstream_state(
-    client: httpx.AsyncClient, fake_cms: FakeCms
-) -> None:
+async def test_healthz_reports_upstream_state(client: httpx.AsyncClient, fake_cms: FakeCms) -> None:
     await warm(client)
     for _ in range(3):
         await client.get(URL, params={"source": "down"})

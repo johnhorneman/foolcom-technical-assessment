@@ -138,6 +138,13 @@ Expect `x-article-version: 2` and a first paragraph beginning
 should still return 200, still be fast, and now show `x-article-version: 2`.
 The stored copy is the corrected one, because the healthy request replaced it.
 
+One thing to know if you use the toolbar instead: publishing while a failure
+mode is active keeps serving the previous version until one request succeeds
+without that mode. The failure modes simulate a CMS the service cannot reach,
+and a correction published during an outage can only propagate on the first
+successful fetch. The `correction_propagated` log line shows exactly when that
+happened.
+
 ### 4. Empty cache
 
 The service never invents content. With nothing stored and a failing upstream
@@ -145,7 +152,8 @@ it returns 503. Warming makes this rare, so to see it, start the service before
 the CMS:
 
 ```bash
-# In terminal 1, stop npm run dev (Ctrl-C).
+# In terminal 1, stop npm run dev (Ctrl-C). Note that restarting the mock
+# CMS resets every article to version 1.
 # In terminal 2, restart the service; it logs cache_warming_skipped.
 # Start npm run dev again, then:
 curl -si "localhost:8000/articles/$ARTICLE?source=down" | grep -iE "^HTTP|^x-cache"

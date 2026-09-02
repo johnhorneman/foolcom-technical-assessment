@@ -90,9 +90,7 @@ async def fake_cms() -> FakeCms:
 async def client(fake_cms: FakeCms):
     # ASGITransport does not run lifespan, so wire app.state the same way.
     app.state.obs = Observability()
-    app.state.cms = CmsClient(
-        obs=app.state.obs, transport=httpx.MockTransport(fake_cms.handler)
-    )
+    app.state.cms = CmsClient(obs=app.state.obs, transport=httpx.MockTransport(fake_cms.handler))
     app.state.cache = ArticleCache()
     app.state.flights = SingleFlight()
     async with httpx.AsyncClient(

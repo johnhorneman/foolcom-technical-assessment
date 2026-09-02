@@ -1,5 +1,7 @@
 # Fool.com Technical Assessment
 
+> **Submission notes for reviewers:** see [REVIEWERS.md](REVIEWERS.md) for how this was built, how to run it, and a step-by-step walkthrough of the checks below.
+
 Article pages on [Fool.com](https://www.fool.com) serve millions of hits a month. They must stay fast and render accurate content even when an upstream service is slow, down, or hanging.
 
 This assessment is a small, self-contained slice of that problem. Work the way you normally would, and feel free to use AI tools (Cursor, Claude Code, etc.). We use them daily ourselves.

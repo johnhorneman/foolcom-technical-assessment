@@ -41,7 +41,7 @@ git diff 35c529a --stat      # every file I added or changed
 
 The service lives in `services/content_service/` (five files, about 500 lines
 including comments). Tests are in `tests/`. The reasoning is in
-`docs/DECISIONS.md` (D-001 through D-014), and `README-SERVICE.md` has the
+`docs/DECISIONS.md` (D-001 through D-015), and `README-SERVICE.md` has the
 behavior matrix and the observability guide. The only change outside those
 places is `httpx` added to `pyproject.toml`. Nothing in `services/mock_cms/`
 or the Next.js app was modified.
@@ -60,15 +60,16 @@ npm run dev
 uv run uvicorn services.content_service.main:app --port 8000
 ```
 
-On startup the service warms its cache from the CMS; the second terminal will
-show a `cache_warmed` log line with `"articles": 4`. Open
+On startup the service warms its cache from the CMS in the background; within
+a second the second terminal shows a `cache_warmed` log line with
+`"articles": 4`. Open
 http://localhost:3000 to see the article list. Note that the mock CMS stores
 articles in memory, so corrections are reset whenever `npm run dev` restarts.
 
 ## Running the tests
 
 ```bash
-uv run pytest -q          # 24 tests, under one second
+uv run pytest -q          # 27 tests, about two seconds
 uv run ruff check .       # lint
 ```
 
@@ -110,7 +111,7 @@ What to look for:
 
 | mode | status | x-cache | time |
 |---|---|---|---|
-| slow | 200 | stale-timeout | about 1s (the budget), not the CMS's 8s |
+| slow | 200 | stale-timeout | about 1s (the reader's deadline), not the CMS's 8s |
 | down | 200 | stale-error | about 100ms |
 | hang | 200 | stale-timeout | about 1s, not forever |
 | corrupt | 200 | stale-error | about 100ms |
@@ -144,6 +145,28 @@ without that mode. The failure modes simulate a CMS the service cannot reach,
 and a correction published during an outage can only propagate on the first
 successful fetch. The `correction_propagated` log line shows exactly when that
 happened.
+
+### 3b. A correction while the CMS is slow
+
+A slow response is still a good response. The reader does not wait for it,
+but the service does: the fetch keeps running after the reader was served
+the stored copy, and writes the cache when it lands (D-015). To see it:
+
+```bash
+curl -si "localhost:8000/articles/$ARTICLE?source=slow" | grep -iE "^x-cache|^x-article-version"
+curl -s -X POST "localhost:3000/api/cms/admin?publish-correction=$ARTICLE"
+sleep 9
+curl -si "localhost:8000/articles/$ARTICLE?source=slow" | grep -iE "^x-cache|^x-article-version"
+```
+
+The first request returns the stored copy at about one second and starts an
+eight-second fetch in the background. The correction is published while that
+fetch is in progress. When the fetch lands it carries the corrected version,
+so the second request, still under `slow`, returns the stored copy at about
+one second with the version incremented. In the service terminal you will see
+an `upstream_fetch` line with `"outcome": "ok"` and `ms` around 8000, then a
+`correction_propagated` line, between the two requests. Without this behavior
+a CMS that stayed slow would never deliver a correction.
 
 ### 4. Empty cache
 
@@ -193,7 +216,8 @@ curl -s localhost:8000/healthz | python3 -m json.tool
 ```
 
 `state` is computed from the last ten upstream attempts: `healthy` if none
-failed, `degraded` if some failed, `failing` if all failed (with at least
+failed, `slow` if none failed but some took longer than the reader's
+deadline, `degraded` if some failed, `failing` if all failed (with at least
 three), `unknown` before any attempt. Run the failure-mode loop and check
 again to see it move to `degraded`; a few healthy requests bring it back.
 

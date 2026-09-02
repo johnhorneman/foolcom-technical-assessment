@@ -6,7 +6,7 @@ this service's logs and metrics alone. Each question maps to one event type:
 1. Is the upstream healthy, slow, or failing right now?
    Every real upstream attempt logs an `upstream_fetch` line with its
    outcome and latency. GET /healthz summarizes a rolling window as
-   healthy, degraded, or failing. GET /metrics has upstream.* counters.
+   healthy, slow, degraded, or failing. GET /metrics has upstream.* counters.
 2. Was this page served from cache or fetched fresh?
    Every served request logs a `request` line whose `cache` field is one of
    fresh, stale-timeout, stale-error, or miss. It is the same value as the
@@ -67,11 +67,13 @@ class Observability:
     rates, where thresholds can change without a deploy.
     """
 
-    def __init__(self, recent_window: int = 10) -> None:
+    def __init__(self, recent_window: int = 10, slow_ms: float = 1000.0) -> None:
         _configure_logging()
         self._started = time.monotonic()
         self.counters: Counter[str] = Counter()
         self.recent: deque[dict] = deque(maxlen=recent_window)
+        # Successful attempts slower than this count as `slow` (D-015).
+        self._slow_ms = slow_ms
 
     # -- recording ----------------------------------------------------------
 
@@ -114,12 +116,17 @@ class Observability:
     def upstream_state(self) -> dict:
         attempts = list(self.recent)
         failures = [a for a in attempts if a["outcome"] in FAILURE_OUTCOMES]
+        slow = [
+            a for a in attempts if a["outcome"] not in FAILURE_OUTCOMES and a["ms"] >= self._slow_ms
+        ]
         if not attempts:
             state = "unknown"
         elif len(failures) == len(attempts) and len(attempts) >= 3:
             state = "failing"
         elif failures:
             state = "degraded"
+        elif slow:
+            state = "slow"
         else:
             state = "healthy"
         return {"state": state, "recent_attempts": attempts}

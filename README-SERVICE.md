@@ -2,7 +2,7 @@
 
 The middle tier this assessment asks for: a FastAPI service on port 8000
 between the Next.js app (port 3000) and the mock CMS (port 8001). Design
-decisions are recorded in `docs/DECISIONS.md` (D-001 through D-014). Working
+decisions are recorded in `docs/DECISIONS.md` (D-001 through D-015). Working
 conventions are in `AGENTS.md`.
 
 ## Run
@@ -14,11 +14,13 @@ uv run uvicorn services.content_service.main:app --port 8000 --reload  # this se
 
 ## Design in 30 seconds
 
-On every request the service fetches the article from the CMS under a time
-budget of about one second. If the response is valid, it is served and stored
-as the last known good copy. If the fetch times out, returns an error, or fails
-validation, the stored copy is served instead. A 503 is returned only when
-there is no stored copy at all.
+On every request the service fetches the article from the CMS. The reader
+waits up to about one second. If a valid response arrives in time, it is
+served and stored as the last known good copy. If the fetch fails, or is still
+running at the deadline, the stored copy is served instead. A fetch that
+outlives the reader keeps running for up to ten seconds and updates the cache
+when it finishes, so a slow CMS still delivers corrections. A 503 is returned
+only when there is no stored copy at all.
 
 Freshness comes from revalidating on every request rather than from a TTL,
 because corrections are published directly to the CMS and this service is not
@@ -29,9 +31,9 @@ notified. Concurrent fetches for the same article are coalesced into one.
 | Mode | Upstream outcome | Response (warm cache) | Latency |
 |---|---|---|---|
 | healthy | 200 valid | fresh, cache updated | ~100ms |
-| slow | timeout at ~1s | last known good (`X-Cache: stale-timeout`) | ~1s |
+| slow | still running at the 1s deadline; answers at ~8s | last known good (`X-Cache: stale-timeout`); the late answer updates the cache | ~1s |
 | down | HTTP 500 | last known good (`X-Cache: stale-error`) | ~100ms |
-| hang | timeout at ~1s | last known good (`X-Cache: stale-timeout`) | ~1s |
+| hang | still running at the 1s deadline; abandoned at 10s | last known good (`X-Cache: stale-timeout`) | ~1s |
 | corrupt | 200, fails validation | last known good (`X-Cache: stale-error`) | ~100ms |
 | any, empty cache | as above | 503 (`X-Cache: miss`) | fast |
 | unknown path | 404 | 404; never served from cache (D-008) | ~100ms |
@@ -47,8 +49,9 @@ event types.
    One line per real upstream attempt, after coalescing. Outcomes are
    `ok`, `timeout`, `unreachable`, `http_error`, `invalid`, and `not_found`.
    For a summary, `curl localhost:8000/healthz` reports a rolling-window
-   verdict of `healthy`, `degraded`, `failing`, or `unknown`, along with the
-   recent attempts.
+   verdict of `healthy`, `slow`, `degraded`, `failing`, or `unknown`, along
+   with the recent attempts. `slow` means recent attempts succeeded but took
+   longer than the reader's deadline.
 2. **Was this page served from cache or fetched fresh?**
    `{"event": "request", "path": "/articles/...", "cache": "stale-error", "status": 200, "version": "2", ...}`
    One line per served request. The `cache` field matches the response's

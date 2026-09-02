@@ -32,11 +32,12 @@ Full requirements: `README.md`. Design rationale: `docs/DECISIONS.md`.
 
 ## Architecture (the short version agents need)
 
-Per request: revalidate against the CMS with a strict time budget (httpx timeouts),
-validate with Pydantic (`models.py`), store validated payloads as last-known-good
-(`cache.py`, keyed by path only, singleflight-coalesced), serve the cached copy when
-the upstream times out, errors, or returns invalid data. Cold cache + failing
-upstream → clean 503. Structured JSON logs + `/metrics` + `/healthz`
+Per request: start or join a fetch from the CMS (`cache.py` SingleFlight, keyed by
+path and source), wait up to the reader's deadline (~1s), validate with Pydantic
+(`models.py`), store validated payloads as last-known-good (`cache.py`, keyed by path
+only), serve the cached copy when the fetch fails or is still running at the deadline.
+A fetch that outlives the reader keeps running (client timeout ~10s) and updates the
+cache when it finishes. Cold cache + failing upstream → clean 503. Structured JSON logs + `/metrics` + `/healthz`
 (`observability.py`).
 
 ## Working conventions — required

@@ -8,9 +8,12 @@ a timeout, a 500, and an invalid payload the same way: fall back to the last
 known good copy. Each real upstream attempt is recorded with its outcome and
 latency for the health view. Coalesced followers never reach this module.
 
-The time budget (D-005) is the main safety mechanism. It is about ten times
-the CMS's healthy latency, so with a warm cache the worst case for a slow or
-hung upstream is one timed-out fetch of about one second.
+Two numbers govern a fetch (D-005, D-015). The client timeout below is the
+give-up bound, about ten seconds: past that, no answer is coming and the
+connection is released. The reader's deadline of about one second is
+enforced in main.py. A response that arrives between the two still updates
+the cache; the reader who triggered it has already been served the stored
+copy.
 """
 
 import time
@@ -23,13 +26,14 @@ from services.content_service.observability import Observability
 
 CMS_BASE_URL = "http://localhost:8001"
 
-# D-005: a total budget of 1s is about 10x the CMS's healthy p50 of 100ms.
-# That leaves little risk of false timeouts locally and still catches `slow`
-# (8s) and `hang` (never) quickly. The connect timeout is tighter because on
-# localhost a connection either succeeds immediately or the process is gone.
-# In production these numbers would come from latency histograms rather
-# than constants.
-UPSTREAM_TIMEOUT = httpx.Timeout(1.0, connect=0.2)
+# D-015: the give-up bound for a fetch, not the reader's deadline (that is
+# READER_DEADLINE_S in main.py). Ten seconds lets a slow but working CMS
+# (the mock's slow mode takes 8s) deliver an answer that updates the cache,
+# and still releases a truly hung connection. The connect timeout is tight
+# because on localhost a connection either succeeds immediately or the
+# process is gone. In production these numbers would come from latency
+# histograms rather than constants.
+UPSTREAM_TIMEOUT = httpx.Timeout(10.0, connect=0.2)
 
 
 class UpstreamError(Exception):
@@ -45,7 +49,7 @@ class ArticleNotFound(UpstreamError):
 
 
 class UpstreamTimeout(UpstreamError):
-    """The CMS did not answer within the time budget (`slow` and `hang`)."""
+    """The CMS did not answer before the client timeout (a true `hang`)."""
 
     outcome = "timeout"
 

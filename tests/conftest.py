@@ -51,18 +51,23 @@ class FakeCms:
         self.store: dict[str, dict] = {ARTICLE["path"]: copy.deepcopy(ARTICLE)}
         self.mode = "healthy"  # applies when the request carries no ?source=
         self.calls = 0
+        self.slow_s = 0.3  # `slow` mode sleeps this long, then answers normally
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
         self.calls += 1
         # Sleep long enough that concurrent requests overlap, which the
         # coalescing test depends on, but short enough to keep the suite
-        # fast. The failure modes below return immediately.
+        # fast. Apart from `slow`, the failure modes return immediately.
         await asyncio.sleep(0.02)
         mode = request.url.params.get("source") or self.mode
         if mode == "down":
             return httpx.Response(500, json={"error": "Internal Server Error"})
-        if mode in ("hang", "slow"):
-            raise httpx.ReadTimeout("simulated budget exhaustion", request=request)
+        if mode == "hang":
+            # Stands in for the client timeout expiring: no answer, ever.
+            raise httpx.ReadTimeout("simulated client timeout", request=request)
+        if mode == "slow":
+            # Answers correctly, but after the reader's deadline (D-015).
+            await asyncio.sleep(self.slow_s)
         if mode == "corrupt":
             return httpx.Response(200, json=CORRUPT_PAYLOAD)
         if request.url.path == "/content":
@@ -89,12 +94,16 @@ async def fake_cms() -> FakeCms:
 @pytest.fixture
 async def client(fake_cms: FakeCms):
     # ASGITransport does not run lifespan, so wire app.state the same way.
-    app.state.obs = Observability()
+    app.state.obs = Observability(slow_ms=100)
     app.state.cms = CmsClient(obs=app.state.obs, transport=httpx.MockTransport(fake_cms.handler))
     app.state.cache = ArticleCache()
     app.state.flights = SingleFlight()
+    # Short deadline so the slow path is exercised in real time without
+    # slowing the suite: healthy answers in ~20ms, slow in ~300ms.
+    app.state.deadline_s = 0.1
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver"
     ) as test_client:
         yield test_client
+        await app.state.flights.drain()  # let background fetches settle
     await app.state.cms.aclose()

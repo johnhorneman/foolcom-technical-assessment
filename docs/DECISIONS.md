@@ -90,7 +90,7 @@ the CMS, so a webhook receiver is not possible. Building fake versions of
 these pieces adds risk without proving anything more.
 Revisit when: not applicable. This is interview discussion material.
 
-## D-005: Timeout budget of about 1s total, 200ms to connect (accepted; tune once the cache exists)
+## D-005: Timeout budget of about 1s total, 200ms to connect (accepted; amended by D-015)
 Date: 2026-08-31
 Context: `slow` takes 8s and `hang` never returns. Healthy is about 100ms. The
 budget decides the worst-case page latency when we have a cached copy.
@@ -104,6 +104,8 @@ would set this from a latency histogram, for example p99 times a small
 multiplier.
 Revisit when: verification shows flakiness, or the reviewers' bar for "fast"
 turns out to be stricter.
+Amended by D-015: the one-second figure is now the reader's deadline, enforced
+in main.py. The httpx client timeout is a separate, longer give-up bound.
 
 ## D-006: Validation is strict schema plus content checks (accepted)
 Date: 2026-08-31
@@ -211,7 +213,7 @@ fields and four modes, and the manual browser checklist still runs against the
 real thing.
 Revisit when: the CMS contract grows.
 
-## D-012: Startup cache warming is built; the production version looks different (accepted)
+## D-012: Startup cache warming is built; the production version looks different (accepted; amended by D-015)
 Date: 2026-08-31
 Context: an empty cache plus a failing upstream is the one case that still
 returns 503 (D-007). When does warming help? Only when the CMS is healthy at
@@ -233,6 +235,9 @@ cold instance. (3) If warming at all, warm only the hot set, for example the
 top N paths from CDN logs, since article traffic is heavily concentrated at the
 head.
 Revisit when: the catalog grows or instances multiply. Switch to (1).
+Amended by D-015: warming now runs as a background task instead of blocking
+startup, because the client timeout became ten seconds and a hung CMS at
+startup would otherwise delay startup by most of a minute.
 
 ## D-013: Circuit breaker; considered and deferred (deferred)
 Date: 2026-08-31
@@ -267,3 +272,33 @@ Production shape if built: a TTL of a few seconds, purge-on-publish driven by
 CMS events, and scope limited to paths that have 404'd repeatedly rather than
 every miss.
 Revisit when: production, with publish events available to purge against.
+
+## D-015: The reader's deadline is separate from the fetch's lifetime (accepted; amends D-005 and D-012)
+Date: 2026-09-02
+Context: with a single one-second timeout, a slow CMS response was cancelled
+at one second and thrown away. That is fine for the reader, who gets the
+stored copy, but the cache never learns what the slow response contained.
+Under a CMS that stays slow, a correction published during the slowdown could
+not propagate at all, which contradicts the requirement that readers get the
+corrected version under every failure mode. Found while rehearsing the
+design review; not caught during the build.
+Options: (a) keep one timeout and accept the gap; (b) raise the timeout so
+slow responses complete, making readers wait for them; (c) two numbers: the
+reader waits up to one second, the fetch may run up to ten, and a fetch that
+outlives the reader still writes the cache when it finishes.
+Choice: (c).
+Why: a slow response is still a good response. The reader should not wait
+for it, but the cache should receive it. The fetch already runs as a task
+inside SingleFlight, so letting it outlive the reader is a matter of not
+cancelling it: the route waits with asyncio.wait rather than wait_for, and
+the validate-and-store step moved into the fetch task so it runs regardless
+of who is still waiting. Ten seconds is the give-up bound for a true hang.
+Two side effects. Warming moved to a background task so a hung CMS at
+startup cannot delay startup (amends D-012). /healthz gained a `slow` state,
+because a slow CMS now logs `ok` with high latency instead of `timeout`, and
+the README asks for healthy, slow, or failing. The cost is that a hung fetch
+holds a connection for ten seconds instead of one; coalescing keeps that to
+one connection per article and source.
+Revisit when: latency data suggests different numbers, or the upstream gains
+a way to signal that it is still working, which would make the give-up bound
+smarter.

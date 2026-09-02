@@ -6,6 +6,7 @@ import asyncio
 
 import httpx
 
+from services.content_service.main import _warm_cache, app
 from tests.conftest import ARTICLE, FakeCms
 
 PATH = ARTICLE["path"]
@@ -124,8 +125,6 @@ async def test_healthz_reports_upstream_state(client: httpx.AsyncClient, fake_cm
 
 
 async def test_warming_fills_cache(client: httpx.AsyncClient) -> None:
-    from services.content_service.main import _warm_cache, app
-
     await _warm_cache(app.state)
     assert app.state.cache.stats() == {"articles_cached": 1, "index_cached": True}
 
@@ -133,8 +132,40 @@ async def test_warming_fills_cache(client: httpx.AsyncClient) -> None:
 async def test_warming_tolerates_dead_upstream(
     client: httpx.AsyncClient, fake_cms: FakeCms
 ) -> None:
-    from services.content_service.main import _warm_cache, app
-
     fake_cms.mode = "down"
     await _warm_cache(app.state)  # must not raise; an empty cache is the fallback
     assert app.state.cache.stats()["articles_cached"] == 0
+
+
+async def test_slow_response_still_updates_cache(
+    client: httpx.AsyncClient, fake_cms: FakeCms
+) -> None:
+    # D-015: the reader gets the stored copy at the deadline, but the slow
+    # fetch keeps running and writes the cache when it lands.
+    await warm(client)
+    fake_cms.publish_correction(PATH)
+    response = await client.get(URL, params={"source": "slow"})
+    assert response.status_code == 200
+    assert response.headers["x-cache"] == "stale-timeout"
+    assert response.headers["x-article-version"] == "1"
+    await app.state.flights.drain()
+    assert app.state.cache.get_article(PATH).article.version == 2
+    metrics = (await client.get("/metrics")).json()
+    assert metrics["counters"]["corrections_propagated"] == 1
+
+
+async def test_cold_cache_slow_returns_503_then_warms(
+    client: httpx.AsyncClient, fake_cms: FakeCms
+) -> None:
+    response = await client.get(URL, params={"source": "slow"})
+    assert response.status_code == 503
+    assert response.headers["x-cache"] == "miss"
+    await app.state.flights.drain()
+    assert app.state.cache.stats()["articles_cached"] == 1
+
+
+async def test_healthz_reports_slow_upstream(client: httpx.AsyncClient, fake_cms: FakeCms) -> None:
+    await client.get(URL, params={"source": "slow"})
+    await app.state.flights.drain()
+    health = (await client.get("/healthz")).json()
+    assert health["upstream"]["state"] == "slow"

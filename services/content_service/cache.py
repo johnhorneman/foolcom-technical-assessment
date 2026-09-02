@@ -74,30 +74,47 @@ class SingleFlight:
     """Coalesce concurrent calls for the same key into one in-flight task.
 
     The first caller for a key starts the work. Anyone who arrives while it
-    is in flight awaits the same task and shares its result, including a
+    is in flight gets the same task and shares its result, including a
     failure. Sharing failures is intentional: when the upstream is timing
-    out, one caller should pay the timeout budget, not every caller.
+    out, one caller should pay the wait, not every caller.
 
     The key matters (D-009). Flights are keyed by path and source, which
     together identify the fetch. The cache is keyed by path alone, which
     identifies the article. Coalescing by path alone could hand a healthy
     request the failure of a concurrent corrupt-mode fetch.
 
-    The task is removed from the registry as soon as it settles, so a
-    finished flight is never joined late. The next request starts a new
-    fetch, which is what revalidating on every request requires.
+    Callers may stop waiting before the task finishes; main.py does exactly
+    that at the reader's deadline (D-015). The task keeps running, and
+    because the fetch writes the cache itself, its result still lands. The
+    task is removed from the registry when it settles, so a finished flight
+    is never joined late and the next request starts a new fetch, which is
+    what revalidating on every request requires.
     """
 
     def __init__(self) -> None:
         self._flights: dict[str, asyncio.Task] = {}
 
-    async def run(self, key: str, fn: Callable[[], Coroutine]) -> object:
-        existing = self._flights.get(key)
-        if existing is not None:
-            return await existing
-        task = asyncio.create_task(fn())
-        self._flights[key] = task
-        try:
-            return await task
-        finally:
+    def start(self, key: str, fn: Callable[[], Coroutine]) -> asyncio.Task:
+        """Return the in-flight task for `key`, starting one if none exists."""
+        task = self._flights.get(key)
+        if task is None:
+            task = asyncio.create_task(fn())
+            self._flights[key] = task
+            task.add_done_callback(lambda done, key=key: self._settle(key, done))
+        return task
+
+    def _settle(self, key: str, task: asyncio.Task) -> None:
+        if self._flights.get(key) is task:
             del self._flights[key]
+        # A caller that stopped waiting never reads the result. Retrieve the
+        # exception here so asyncio does not log it as never retrieved.
+        if not task.cancelled():
+            task.exception()
+
+    async def run(self, key: str, fn: Callable[[], Coroutine]) -> object:
+        """Start (or join) the flight for `key` and wait for its result."""
+        return await self.start(key, fn)
+
+    async def drain(self) -> None:
+        """Wait for every in-flight task to settle. Used by tests."""
+        await asyncio.gather(*list(self._flights.values()), return_exceptions=True)
